@@ -49,19 +49,28 @@ If you see exactly this line `e1000e 0000:00:1f.6: The NVM Checksum Is Not Valid
 
 this fix if for you.
 
-## FIX
-1. Open Terminal (Ctrl+Alt+T).
-2. Open the folder containing install.sh.
-3. Run: sudo bash install.sh
-4. When the script says Completed, run: sudo reboot
+## OFFLINE FIX
+TODO: Provide instructions for the offline fix. Completely free of internet requirement.
 
-This will patch the driver.
-After the patch, you should see 
+## ONLINE FIX
+1. Open Terminal (Ctrl+Alt+T).
+1. Open the folder containing install.sh.
+1. Run: `sudo bash online_fix.sh` to start the patching.
+1. It will prompt you for the MOK (Machine Owner Key) password if Secure Boot is enabled.
+1. Remember the MOK password you set, as you will need it to enroll the key after reboot.
+1. Run: `sudo reboot`
+
+This time, you will see a blue screen prompting you to enroll the MOK (Machine Owner Key) that you set earlier.
+![Blue screen for MOK enrollment](./images/MOK01.jpg)
+Select "Enroll MOK" and then enter the MOK password you set earlier, and choose continue.
+
+
 
 
 ## VERIFY AFTER REBOOT
 
 ### Check which driver is being loaded
+After the patch, you should see `e1000e` being loaded from the `updates` directory.
 First, check if the patched driver is being loaded via `modinfo -n e1000e`.
 
 If you see
