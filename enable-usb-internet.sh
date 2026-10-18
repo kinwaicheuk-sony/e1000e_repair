@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Ubuntu: try NetworkManager first, fall back to ISC dhclient.
+set -Eeuo pipefail
+
+log() { printf '[usb-net] %s\n' "$*"; }
+fail() { printf '[usb-net] ERROR: %s\n' "$*" >&2; exit 1; }
+
+(( EUID == 0 )) || fail 'Run with sudo: sudo bash enable-usb-internet-v3.sh [interface]'
+command -v ip >/dev/null || fail 'iproute2 is required.'
+
+is_usb_ethernet() {
+    local iface="$1" path
+    [[ -d "/sys/class/net/$iface" ]] || return 1
+    [[ "$(cat "/sys/class/net/$iface/type" 2>/dev/null)" == 1 ]] || return 1
+    path="$(readlink -f "/sys/class/net/$iface/device" 2>/dev/null || true)"
+    [[ "$path" == *'/usb'* ]] || [[ "$iface" == enx* || "$iface" == wwx* ]]
+}
+
+if [[ $# -gt 1 ]]; then fail 'Usage: sudo bash enable-usb-internet-v3.sh [interface]'; fi
+if [[ $# -eq 1 ]]; then
+    IFACE="$1"
+    is_usb_ethernet "$IFACE" || fail "'$IFACE' is not a detected USB Ethernet interface."
+else
+    mapfile -t CANDIDATES < <(for p in /sys/class/net/*; do i="${p##*/}"; if is_usb_ethernet "$i"; then printf '%s\n' "$i"; fi; done)
+    ((${#CANDIDATES[@]})) || fail 'No USB Ethernet interface found. Plug in the adapter.'
+    if ((${#CANDIDATES[@]} > 1)); then
+        printf '[usb-net] Multiple USB Ethernet interfaces found: %s\n' "${CANDIDATES[*]}" >&2
+        fail 'Specify one explicitly: sudo bash enable-usb-internet-v3.sh INTERFACE'
+    fi
+    IFACE="${CANDIDATES[0]}"
+fi
+log "Using $IFACE"
+ip link set dev "$IFACE" up
+
+has_ipv4() { ip -4 -o addr show dev "$IFACE" scope global | grep -q ' inet '; }
+has_default_route() { ip -4 route show default dev "$IFACE" | grep -q '^default '; }
+check_internet() {
+    has_ipv4 && has_default_route || return 1
+    # Test internet reachability; ping may be blocked on some networks.
+    ping -n -I "$IFACE" -c 1 -W 3 1.1.1.1 >/dev/null 2>&1
+}
+show_status() {
+    log 'IPv4 addresses:'
+    ip -4 addr show dev "$IFACE"
+    log 'Default route(s) on this interface:'
+    ip -4 route show default dev "$IFACE"
+}
+
+NM_ATTEMPTED=0
+if command -v nmcli >/dev/null 2>&1 && nmcli -t -f RUNNING general 2>/dev/null | grep -qx running; then
+    NM_ATTEMPTED=1
+    log 'Trying NetworkManager first (up to 30 seconds)...'
+    nmcli device set "$IFACE" managed yes >/dev/null 2>&1 || true
+    if timeout 30s nmcli --wait 25 device connect "$IFACE"; then
+        if check_internet; then
+            log 'SUCCESS: Internet works through NetworkManager.'
+            show_status
+            exit 0
+        fi
+        log 'NetworkManager connected, but internet test failed.'
+    else
+        log 'NetworkManager could not activate the connection.'
+    fi
+    log 'Switching this USB adapter to manual DHCP to prevent competing DHCP clients.'
+    nmcli device disconnect "$IFACE" >/dev/null 2>&1 || true
+    nmcli device set "$IFACE" managed no >/dev/null 2>&1 || true
+fi
+
+command -v dhclient >/dev/null 2>&1 || fail 'dhclient is not installed. Install isc-dhcp-client.'
+# Clear any addresses/routes left by the failed NetworkManager attempt.
+if ((NM_ATTEMPTED)); then
+    ip -4 addr flush dev "$IFACE" scope global
+fi
+ip link set dev "$IFACE" up
+log 'Requesting an IPv4 address with dhclient...'
+if ! timeout 65s dhclient -1 -v "$IFACE"; then
+    show_status
+    fail 'DHCP failed. Check cable, switch port and DHCP server.'
+fi
+show_status
+if check_internet; then
+    log 'SUCCESS: Internet works through dhclient fallback.'
+elif has_ipv4 && has_default_route; then
+    log 'DHCP succeeded and a default route exists, but ping to 1.1.1.1 failed.'
+    log 'ICMP may be blocked, or internet access may still be unavailable.'
+else
+    fail 'DHCP did not provide both an IPv4 address and a default route.'
+fi
