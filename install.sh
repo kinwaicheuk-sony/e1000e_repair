@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 # Intel I219-V [8086:15b8] NVM checksum bypass for Ubuntu 22.04 HWE 6.8.
 # Only tested on kernel 6.8.0-138-generic. Run with working backup networking.
+# v9: install the exact kernel compiler and check it before building.
+# Refresh APT indexes after enabling deb-src, even if entries already exist.
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 info() { printf '\n==> %s\n' "$*"; }
@@ -37,20 +39,28 @@ if ! apt-get update; then
   fail 'apt-get update failed. Check internet, system clock, and Ubuntu repositories.'
 fi
 if ! DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  build-essential "linux-headers-$KERNEL" dpkg-dev \
+  build-essential gcc-12 g++-12 "linux-headers-$KERNEL" dpkg-dev \
   pciutils kmod binutils python3 mokutil shim-signed initramfs-tools; then
   fail "Dependency installation failed. Check connectivity, clock, and availability of headers for $KERNEL."
 fi
-for tool in lspci python3 mokutil update-initramfs gcc make modinfo depmod; do
+for tool in lspci python3 mokutil update-initramfs gcc-12 make modinfo depmod; do
   command -v "$tool" >/dev/null || fail "Missing required tool after installation: $tool"
 done
 [[ -d "/lib/modules/$KERNEL/build" ]] || fail "Kernel headers missing for $KERNEL"
+# Ubuntu's 6.8 HWE kernels were built with gcc-12. The generic gcc
+# command may point to a different version or may not be installed.
+# Set CC explicitly so the kernel build system uses the right compiler.
+KERNEL_COMPILER=gcc-12
+if ! "$KERNEL_COMPILER" -dumpversion >/dev/null 2>&1; then
+  fail "Kernel compiler $KERNEL_COMPILER is not working after dependency installation"
+fi
+info "Using kernel compiler: $($KERNEL_COMPILER --version | head -1)"
 
 PCI=$(lspci -Dnns 00:1f.6 2>/dev/null || true)
 [[ "$PCI" == *'[8086:15b8]'* ]] || fail "Unexpected Ethernet controller at 00:1f.6: $PCI"
 if ! dmesg | grep -q 'The NVM Checksum Is Not Valid'; then
   echo 'WARNING: No original NVM checksum failure found in current boot log.'
-  read -r -p 'IT has confirmed this exact issue on this PC? Type YES to continue: ' answer
+  read -r -p 'You has confirmed this exact issue on this PC? Type YES to continue: ' answer
   [[ "$answer" == YES ]] || fail 'Cancelled'
 fi
 
@@ -67,10 +77,10 @@ if [[ "$SB_STATE" == *'SecureBoot enabled'* ]]; then
     info 'Secure Boot key is missing; generating a local MOK key'
     command -v update-secureboot-policy >/dev/null || fail 'update-secureboot-policy unavailable (shim-signed package)'
     if [[ -e "$KEY" || -e "$CERT" ]]; then
-      fail 'Only one MOK file exists (incomplete key pair). Contact IT; do not overwrite an existing private key.'
+      fail 'Only one MOK file exists (incomplete key pair). Contact someone; do not overwrite an existing private key.'
     fi
-    update-secureboot-policy --new-key || fail 'Could not generate MOK key. Contact IT.'
-    [[ -s "$KEY" && -s "$CERT" ]] || fail 'MOK key generation did not create both files. Contact IT.'
+    update-secureboot-policy --new-key || fail 'Could not generate MOK key. Contact someone.'
+    [[ -s "$KEY" && -s "$CERT" ]] || fail 'MOK key generation did not create both files. Contact someone.'
   fi
 
   TEST_RESULT=$(mokutil --test-key "$CERT" 2>&1 || true)
@@ -96,7 +106,7 @@ if [[ "$SB_STATE" == *'SecureBoot enabled'* ]]; then
     PENDING=$(mokutil --list-new 2>&1 || true)
     if [[ -z "${PENDING//[[:space:]]/}" ]] || ! printf '%s' "$PENDING" | grep -qiE 'subject:|issuer:|sha1 fingerprint:|sha256 fingerprint:|certificate|serial number:'; then
       echo "$PENDING" >&2
-      fail 'MOK enrollment was not confirmed as pending. Do NOT reboot expecting MOK Manager. Contact IT.'
+      fail 'MOK enrollment was not confirmed as pending. Do NOT reboot expecting MOK Manager. Contact someone.'
     fi
     echo
     echo 'MOK enrollment request is pending:'
@@ -176,19 +186,23 @@ for path in files:
         print(f'Enabled Ubuntu source packages: {path} (backup: {backup})')
 print(f'Changed {changed} APT source configuration file(s).')
 PYAPT
-  if ! apt-get update; then
-    fail 'APT update failed while retrieving source indexes. Check internet, system time, and your mirror.'
-  fi
+fi
+# Even when deb-src entries are already present, source indexes may not
+# have been downloaded yet. Always refresh before the final check.
+info 'Refreshing APT indexes (including source indexes)'
+if ! apt-get update; then
+  fail 'APT update failed while retrieving source indexes. Check internet, system time, and your mirror.'
 fi
 if ! apt-cache showsrc linux-hwe-6.8 >/dev/null 2>&1; then
   echo 'Available Ubuntu source indexes:' >&2
   apt-cache showsrc linux 2>&1 | head -12 >&2 || true
   echo 'Active source repository entries:' >&2
   grep -RhE '^[[:space:]]*deb-src[[:space:]]|^[[:space:]]*Types:.*deb-src|^[[:space:]]*Suites:' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | head -35 >&2 || true
-  fail 'linux-hwe-6.8 source is unavailable from the configured mirror. Ask IT to enable its Jammy source packages; no driver changes were made.'
+  fail 'linux-hwe-6.8 source is unavailable from the configured mirror. Ask someone to enable its Jammy source packages; no driver changes were made.'
 fi
 WORKDIR="/var/tmp/e1000e-repair-$KERNEL"
 mkdir -p "$WORKDIR"
+chmod 755 "$WORKDIR"
 cd "$WORKDIR"
 info 'Downloading Ubuntu HWE kernel source'
 if ! compgen -G 'linux-hwe-6.8-*/drivers/net/ethernet/intel/e1000e/netdev.c' >/dev/null; then
@@ -242,7 +256,7 @@ ccflags-y += -I$(src)
 MAKEFILE
 
 info 'Building driver'
-make -C "/lib/modules/$KERNEL/build" M="$PWD" modules -j"$(nproc)"
+make -C "/lib/modules/$KERNEL/build" M="$PWD" CC="$KERNEL_COMPILER" modules -j"$(nproc)"
 [[ -s e1000e.ko ]] || fail 'Driver module not created'
 VERMAGIC=$(modinfo -F vermagic ./e1000e.ko)
 [[ "$VERMAGIC" == "$KERNEL "* ]] || fail "Module kernel mismatch: $VERMAGIC"
