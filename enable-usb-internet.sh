@@ -61,18 +61,18 @@ sync_clock() {
     if systemctl list-unit-files systemd-timesyncd.service --no-legend 2>/dev/null | grep -q '^systemd-timesyncd.service'; then
       systemctl restart systemd-timesyncd.service || true
     fi
-    for i in $(seq 1 20); do
+    for i in $(seq 1 5); do
       if [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]]; then
         echo 'SUCCESS: Clock synchronized using NTP.'
         timedatectl status
         return 0
       fi
-      sleep 2
+      sleep 1
     done
   fi
 
   echo
-  echo 'WARNING: Automatic synchronization was not confirmed within 40 seconds.'
+  echo 'WARNING: Automatic synchronization was not confirmed within 5 seconds.'
   echo 'Manual time entry requires a reliable clock (e.g., a phone).'
   if [[ ! -t 0 ]]; then
     echo 'No interactive terminal available; skipping manual time entry.'
@@ -125,9 +125,9 @@ sync_clock() {
 NM_ATTEMPTED=0
 if command -v nmcli >/dev/null 2>&1 && nmcli -t -f RUNNING general 2>/dev/null | grep -qx running; then
     NM_ATTEMPTED=1
-    log 'Trying NetworkManager first (up to 30 seconds)...'
+    log 'Trying NetworkManager first (up to 5 seconds)...'
     nmcli device set "$IFACE" managed yes >/dev/null 2>&1 || true
-    if timeout 30s nmcli --wait 25 device connect "$IFACE"; then
+    if timeout 5s nmcli --wait 2 device connect "$IFACE"; then
         if check_internet; then
             log 'SUCCESS: Internet works through NetworkManager.'
             show_status
