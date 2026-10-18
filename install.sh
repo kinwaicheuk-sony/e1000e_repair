@@ -15,21 +15,20 @@ trap 'echo "Installation failed at line $LINENO. Original in-tree module was not
 . /etc/os-release
 [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 22.04 ]] || fail 'Only Ubuntu 22.04 is supported'
 KERNEL=$(uname -r)
-if [[ "$KERNEL" == '6.8.0-138-generic' ]]; then
+if [[ "$KERNEL" == '6.8.0-138-generic' ]] || [[ "$KERNEL" == '6.8.0-40-generic' ]]; then
   info "Running on tested kernel: $KERNEL"
-elif [[ "$KERNEL" == '6.8.0-40-generic' ]]; then
+else
+  # check for current kernel
   echo >&2 '============================================================'
-  echo >&2 'WARNING: UNTESTED KERNEL 6.8.0-40-generic' 
-  echo >&2 'The checksum bypass was verified only on 6.8.0-138-generic.'
-  echo >&2 'This installer will attempt to build for 6.8.0-40-generic.'
-  echo >&2 'The repository may supply newer source than this old kernel.'
+  echo >&2 "WARNING: UNTESTED KERNEL $KERNEL" 
+  echo >&2 'The checksum bypass was verified only on 6.8.0-40-generic and 6.8.0-138-generic.'
+  echo >&2 "This installer will attempt to build for $KERNEL."
+  echo >&2 'The repository may supply source that differs from the running kernel.'
   echo >&2 'Build, module loading, or network operation may fail.'
   echo >&2 'Keep a working USB Ethernet adapter and a recovery kernel.'
   echo >&2 '============================================================'
-  read -r -p 'Type YES to attempt installation on 6.8.0-40-generic: ' answer
+  read -r -p "Type YES to attempt installation on $KERNEL: " answer
   [[ "$answer" == YES ]] || fail 'Cancelled by user'
-else
-  fail "Unsupported kernel $KERNEL. Allowed: 6.8.0-138-generic (tested), 6.8.0-40-generic (experimental)."
 fi
 # Install prerequisites before checking for tools such as gcc and lspci.
 # An existing USB Ethernet connection (or other working internet) is required.
