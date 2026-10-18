@@ -13,8 +13,39 @@ trap 'echo "Installation failed at line $LINENO. Original in-tree module was not
 . /etc/os-release
 [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 22.04 ]] || fail 'Only Ubuntu 22.04 is supported'
 KERNEL=$(uname -r)
-[[ "$KERNEL" == '6.8.0-138-generic' ]] || fail "Untested kernel $KERNEL (expected 6.8.0-138-generic). Contact IT."
-command -v lspci >/dev/null || fail 'Missing lspci (install pciutils)'
+if [[ "$KERNEL" == '6.8.0-138-generic' ]]; then
+  info "Running on tested kernel: $KERNEL"
+elif [[ "$KERNEL" == '6.8.0-40-generic' ]]; then
+  echo >&2 '============================================================'
+  echo >&2 'WARNING: UNTESTED KERNEL 6.8.0-40-generic' 
+  echo >&2 'The checksum bypass was verified only on 6.8.0-138-generic.'
+  echo >&2 'This installer will attempt to build for 6.8.0-40-generic.'
+  echo >&2 'The repository may supply newer source than this old kernel.'
+  echo >&2 'Build, module loading, or network operation may fail.'
+  echo >&2 'Keep a working USB Ethernet adapter and a recovery kernel.'
+  echo >&2 '============================================================'
+  read -r -p 'Type YES to attempt installation on 6.8.0-40-generic: ' answer
+  [[ "$answer" == YES ]] || fail 'Cancelled by user'
+else
+  fail "Unsupported kernel $KERNEL. Allowed: 6.8.0-138-generic (tested), 6.8.0-40-generic (experimental)."
+fi
+# Install prerequisites before checking for tools such as gcc and lspci.
+# An existing USB Ethernet connection (or other working internet) is required.
+command -v apt-get >/dev/null || fail 'apt-get missing'
+info 'Installing build tools and required packages (internet required)'
+if ! apt-get update; then
+  fail 'apt-get update failed. Check internet, system clock, and Ubuntu repositories.'
+fi
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  build-essential "linux-headers-$KERNEL" dpkg-dev \
+  pciutils kmod binutils python3 mokutil shim-signed initramfs-tools; then
+  fail "Dependency installation failed. Check connectivity, clock, and availability of headers for $KERNEL."
+fi
+for tool in lspci python3 mokutil update-initramfs gcc make modinfo depmod; do
+  command -v "$tool" >/dev/null || fail "Missing required tool after installation: $tool"
+done
+[[ -d "/lib/modules/$KERNEL/build" ]] || fail "Kernel headers missing for $KERNEL"
+
 PCI=$(lspci -Dnns 00:1f.6 2>/dev/null || true)
 [[ "$PCI" == *'[8086:15b8]'* ]] || fail "Unexpected Ethernet controller at 00:1f.6: $PCI"
 if ! dmesg | grep -q 'The NVM Checksum Is Not Valid'; then
@@ -22,14 +53,6 @@ if ! dmesg | grep -q 'The NVM Checksum Is Not Valid'; then
   read -r -p 'IT has confirmed this exact issue on this PC? Type YES to continue: ' answer
   [[ "$answer" == YES ]] || fail 'Cancelled'
 fi
-[[ -d "/lib/modules/$KERNEL/build" ]] || fail 'Kernel headers missing'
-command -v apt-get >/dev/null || fail 'apt-get missing'
-command -v apt >/dev/null || fail 'apt missing'
-command -v python3 >/dev/null || fail 'python3 missing'
-command -v mokutil >/dev/null || fail 'mokutil missing'
-command -v update-initramfs >/dev/null || fail 'update-initramfs missing'
-command -v gcc >/dev/null || fail 'gcc missing'
-command -v make >/dev/null || fail 'make missing'
 
 info 'Checking Secure Boot signing key'
 SB_STATE=$(mokutil --sb-state 2>&1 || true)
