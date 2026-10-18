@@ -5,7 +5,7 @@ set -Eeuo pipefail
 log() { printf '[usb-net] %s\n' "$*"; }
 fail() { printf '[usb-net] ERROR: %s\n' "$*" >&2; exit 1; }
 
-(( EUID == 0 )) || fail 'Run with sudo: sudo bash enable-usb-internet-v3.sh [interface]'
+(( EUID == 0 )) || fail 'Run with sudo: sudo bash enable-usb-internet-with-time.sh [interface]'
 command -v ip >/dev/null || fail 'iproute2 is required.'
 
 is_usb_ethernet() {
@@ -16,7 +16,7 @@ is_usb_ethernet() {
     [[ "$path" == *'/usb'* ]] || [[ "$iface" == enx* || "$iface" == wwx* ]]
 }
 
-if [[ $# -gt 1 ]]; then fail 'Usage: sudo bash enable-usb-internet-v3.sh [interface]'; fi
+if [[ $# -gt 1 ]]; then fail 'Usage: sudo bash enable-usb-internet-with-time.sh [interface]'; fi
 if [[ $# -eq 1 ]]; then
     IFACE="$1"
     is_usb_ethernet "$IFACE" || fail "'$IFACE' is not a detected USB Ethernet interface."
@@ -25,7 +25,7 @@ else
     ((${#CANDIDATES[@]})) || fail 'No USB Ethernet interface found. Plug in the adapter.'
     if ((${#CANDIDATES[@]} > 1)); then
         printf '[usb-net] Multiple USB Ethernet interfaces found: %s\n' "${CANDIDATES[*]}" >&2
-        fail 'Specify one explicitly: sudo bash enable-usb-internet-v3.sh INTERFACE'
+        fail 'Specify one explicitly: sudo bash enable-usb-internet-with-time.sh INTERFACE'
     fi
     IFACE="${CANDIDATES[0]}"
 fi
@@ -46,6 +46,82 @@ show_status() {
     ip -4 route show default dev "$IFACE"
 }
 
+# After networking, try NTP and offer manual time entry if it fails.
+sync_clock() {
+  if ! command -v timedatectl >/dev/null 2>&1; then
+    log 'WARNING: timedatectl unavailable; skipping time configuration.'
+    return 0
+  fi
+  echo 'Current clock:'
+  timedatectl status
+
+  echo
+  echo 'Enabling automatic NTP synchronization...'
+  if timedatectl set-ntp true; then
+    if systemctl list-unit-files systemd-timesyncd.service --no-legend 2>/dev/null | grep -q '^systemd-timesyncd.service'; then
+      systemctl restart systemd-timesyncd.service || true
+    fi
+    for i in $(seq 1 20); do
+      if [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)" == yes ]]; then
+        echo 'SUCCESS: Clock synchronized using NTP.'
+        timedatectl status
+        return 0
+      fi
+      sleep 2
+    done
+  fi
+
+  echo
+  echo 'WARNING: Automatic synchronization was not confirmed within 40 seconds.'
+  echo 'Manual time entry requires a reliable clock (e.g., a phone).'
+  if [[ ! -t 0 ]]; then
+    echo 'No interactive terminal available; skipping manual time entry.'
+    return 1
+  fi
+  read -r -p 'Set the clock manually? [y/N]: ' answer
+  if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+    echo 'Clock unchanged; automatic NTP remains configured where supported.'
+    return 1
+  fi
+
+  current_tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  echo "Current timezone: ${current_tz:-unknown}"
+  read -r -p 'Change timezone to Asia/Tokyo? [y/N]: ' change_tz
+  if [[ "$change_tz" =~ ^[Yy]$ ]]; then
+    timedatectl set-timezone Asia/Tokyo
+  fi
+
+  echo 'Enter the current LOCAL date/time using a trusted clock.'
+  read -r -p 'YYYY-MM-DD HH:MM:SS: ' manual_time
+  if [[ ! "$manual_time" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then
+    echo 'Invalid format; clock unchanged.' >&2
+    return 1
+  fi
+
+  # Reject invalid calendar dates and times before changing the clock.
+  if ! date -d "$manual_time" '+%Y-%m-%d %H:%M:%S' 2>/dev/null | grep -Fxq "$manual_time"; then
+    echo 'Invalid date/time; clock unchanged.' >&2
+    return 1
+  fi
+
+  echo "About to set local time to: $manual_time"
+  read -r -p 'Confirm? [y/N]: ' confirm
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    echo 'Cancelled; clock unchanged.'
+    return 1
+  fi
+
+  timedatectl set-ntp false
+  timedatectl set-time "$manual_time"
+  # Keep the hardware clock consistent when possible.
+  if command -v hwclock >/dev/null 2>&1; then
+    hwclock --systohc || echo 'WARNING: Could not update hardware clock.' >&2
+  fi
+
+  echo 'SUCCESS: Clock set manually. Automatic NTP is disabled.'
+  timedatectl status
+}
+
 NM_ATTEMPTED=0
 if command -v nmcli >/dev/null 2>&1 && nmcli -t -f RUNNING general 2>/dev/null | grep -qx running; then
     NM_ATTEMPTED=1
@@ -55,6 +131,7 @@ if command -v nmcli >/dev/null 2>&1 && nmcli -t -f RUNNING general 2>/dev/null |
         if check_internet; then
             log 'SUCCESS: Internet works through NetworkManager.'
             show_status
+            sync_clock || log "Time setting skipped; network remains configured."
             exit 0
         fi
         log 'NetworkManager connected, but internet test failed.'
@@ -80,9 +157,12 @@ fi
 show_status
 if check_internet; then
     log 'SUCCESS: Internet works through dhclient fallback.'
+    sync_clock || log "Time setting skipped; network remains configured."
 elif has_ipv4 && has_default_route; then
     log 'DHCP succeeded and a default route exists, but ping to 1.1.1.1 failed.'
     log 'ICMP may be blocked, or internet access may still be unavailable.'
+    log 'Attempting NTP synchronization anyway...'
+    sync_clock || log "Time setting skipped; network remains configured."
 else
     fail 'DHCP did not provide both an IPv4 address and a default route.'
 fi
