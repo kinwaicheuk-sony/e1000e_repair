@@ -61,17 +61,132 @@ if [[ "$SB_STATE" == *'SecureBoot enabled'* ]]; then
   SB_ENABLED=1
   KEY=/var/lib/shim-signed/mok/MOK.priv
   CERT=/var/lib/shim-signed/mok/MOK.der
-  [[ -s "$KEY" && -s "$CERT" ]] || fail 'Secure Boot enabled but MOK signing key missing. Contact IT.'
+
+  # Each machine creates and enrolls its own key. Never distribute MOK.priv.
+  if [[ ! -s "$KEY" || ! -s "$CERT" ]]; then
+    info 'Secure Boot key is missing; generating a local MOK key'
+    command -v update-secureboot-policy >/dev/null || fail 'update-secureboot-policy unavailable (shim-signed package)'
+    if [[ -e "$KEY" || -e "$CERT" ]]; then
+      fail 'Only one MOK file exists (incomplete key pair). Contact IT; do not overwrite an existing private key.'
+    fi
+    update-secureboot-policy --new-key || fail 'Could not generate MOK key. Contact IT.'
+    [[ -s "$KEY" && -s "$CERT" ]] || fail 'MOK key generation did not create both files. Contact IT.'
+  fi
+
   TEST_RESULT=$(mokutil --test-key "$CERT" 2>&1 || true)
   echo "$TEST_RESULT"
-  [[ "$TEST_RESULT" == *'already enrolled'* ]] || fail 'MOK certificate not enrolled. Enroll it first, reboot, then retry.'
+  if [[ "$TEST_RESULT" != *'already enrolled'* ]]; then
+    echo
+    echo '============================================================'
+    echo 'ACTION REQUIRED: SECURE BOOT KEY ENROLLMENT'
+    echo 'A signing key exists but has not been enrolled.'
+    echo 'You will be prompted for a TEMPORARY enrollment password.'
+    echo 'Choose a password you can enter again at the blue MOK screen.'
+    echo '============================================================'
+
+    # Ubuntu update-secureboot-policy --enroll-key can return without
+    # queuing an import (for example in some Secure Boot states).
+    # Use mokutil directly and VERIFY that the request was queued.
+    if [[ ! -t 0 ]]; then
+      fail 'Interactive terminal required for MOK password entry. Run: sudo bash install.sh in a terminal.'
+    fi
+    if ! mokutil --import "$CERT"; then
+      fail 'mokutil could not request MOK enrollment. No driver installed.'
+    fi
+    PENDING=$(mokutil --list-new 2>&1 || true)
+    if [[ -z "${PENDING//[[:space:]]/}" ]] || ! printf '%s' "$PENDING" | grep -qiE 'subject:|issuer:|sha1 fingerprint:|sha256 fingerprint:|certificate|serial number:'; then
+      echo "$PENDING" >&2
+      fail 'MOK enrollment was not confirmed as pending. Do NOT reboot expecting MOK Manager. Contact IT.'
+    fi
+    echo
+    echo 'MOK enrollment request is pending:'
+    printf '%s\n' "$PENDING" | head -30
+    echo
+    echo 'REBOOT REQUIRED: At the blue MOK Manager screen, choose:'
+    echo '  Enroll MOK -> Continue -> Yes -> enter the password -> Reboot'
+    echo 'After returning to Ubuntu, run: sudo bash install.sh'
+    echo 'No driver was installed yet.'
+    exit 0
+  fi
 fi
 
-info 'Checking source repositories'
+info 'Checking Ubuntu source repositories'
+# apt-cache showsrc can fail if deb-src is disabled or if the Ubuntu
+# mirror has no source indexes. Configure the same Ubuntu mirror already
+# used for binary packages; do not silently switch to a public mirror.
 if ! apt-cache showsrc linux-hwe-6.8 >/dev/null 2>&1; then
-  fail 'Ubuntu source repositories (deb-src) are not enabled. Contact IT.'
-fi
+  info 'Source package not indexed; enabling deb-src on Ubuntu Jammy repositories'
+  python3 - <<'PYAPT'
+from pathlib import Path
+import re
 
+root = Path('/etc/apt')
+files = [root / 'sources.list'] + sorted((root / 'sources.list.d').glob('*.list')) + sorted((root / 'sources.list.d').glob('*.sources'))
+jammy = re.compile(r'^jammy(?:-(?:updates|security|backports|proposed))?$')
+changed = 0
+for path in files:
+    if not path.is_file():
+        continue
+    original = path.read_text()
+    if path.suffix == '.sources':
+        # Parse deb822 stanzas, retaining all mirror-specific settings.
+        blocks = re.split(r'(\n[ \t]*\n)', original)
+        for i in range(0, len(blocks), 2):
+            block = blocks[i]
+            fields = dict((m.group(1).lower(), m.group(2).strip()) for m in re.finditer(r'(?m)^([A-Za-z-]+):[ \t]*(.*)$', block))
+            if fields.get('enabled', 'yes').lower() == 'no':
+                continue
+            suites = fields.get('suites', '').split()
+            types = fields.get('types', '').split()
+            if 'deb' not in types or 'deb-src' in types or not any(jammy.fullmatch(x) for x in suites):
+                continue
+            blocks[i] = re.sub(r'(?m)^(Types:[ \t]*)(.*)$', lambda m: m.group(1) + m.group(2).rstrip() + ' deb-src', block, count=1)
+        updated = ''.join(blocks)
+    else:
+        lines = original.splitlines(keepends=True)
+        new_lines = []
+        existing = {x.strip() for x in lines}
+        for line in lines:
+            new_lines.append(line)
+            m = re.match(r'^(\s*)deb\s+(.*)$', line)
+            if not m or line.lstrip().startswith('#'):
+                continue
+            rest = m.group(2).strip()
+            # APT one-line syntax: deb [options] URI suite components...
+            tokens = rest.split()
+            if tokens and tokens[0].startswith('['):
+                try:
+                    closing = tokens.index(next(t for t in tokens if t.endswith(']')))
+                    tokens = tokens[closing+1:]
+                except StopIteration:
+                    continue
+            if len(tokens) < 3 or not jammy.fullmatch(tokens[1]):
+                continue
+            candidate = f'{m.group(1)}deb-src {rest}'
+            if candidate.strip() not in existing:
+                new_lines.append(candidate + '\n')
+                existing.add(candidate.strip())
+        updated = ''.join(new_lines)
+    if updated != original:
+        backup = path.with_name(path.name + '.e1000e-backup')
+        if not backup.exists():
+            backup.write_text(original)
+        path.write_text(updated)
+        changed += 1
+        print(f'Enabled Ubuntu source packages: {path} (backup: {backup})')
+print(f'Changed {changed} APT source configuration file(s).')
+PYAPT
+  if ! apt-get update; then
+    fail 'APT update failed while retrieving source indexes. Check internet, system time, and your mirror.'
+  fi
+fi
+if ! apt-cache showsrc linux-hwe-6.8 >/dev/null 2>&1; then
+  echo 'Available Ubuntu source indexes:' >&2
+  apt-cache showsrc linux 2>&1 | head -12 >&2 || true
+  echo 'Active source repository entries:' >&2
+  grep -RhE '^[[:space:]]*deb-src[[:space:]]|^[[:space:]]*Types:.*deb-src|^[[:space:]]*Suites:' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | head -35 >&2 || true
+  fail 'linux-hwe-6.8 source is unavailable from the configured mirror. Ask IT to enable its Jammy source packages; no driver changes were made.'
+fi
 WORKDIR="/var/tmp/e1000e-repair-$KERNEL"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
