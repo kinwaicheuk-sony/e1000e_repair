@@ -55,7 +55,10 @@ if [[ $STATE == *'SecureBoot enabled'* ]]; then
       -subj '/CN=e1000e offline repair/' -addext 'extendedKeyUsage=codeSigning')
   fi
   [[ -s $KEY && -s $CERT ]] || fail 'Incomplete local signing key pair; do not overwrite it.'
-  if ! mokutil --test-key "$CERT"; then
+  # Some mokutil versions report "not enrolled" with a successful exit status.
+  KEY_STATUS=$(LC_ALL=C mokutil --test-key "$CERT" 2>&1 || true)
+  printf '%s\n' "$KEY_STATUS"
+  if [[ $KEY_STATUS != *'already enrolled'* ]]; then
     [[ -t 0 ]] || fail 'Interactive terminal required for MOK enrollment'
     mokutil --import "$CERT"
     mokutil --list-new
@@ -63,7 +66,13 @@ if [[ $STATE == *'SecureBoot enabled'* ]]; then
     echo 'then return to Ubuntu and run this offline installer again. No driver installed yet.'
     exit 0
   fi
-  ./sign-file sha256 "$KEY" "$CERT" "$TMP/e1000e.ko"
+  # USB/FAT transfers may lose execute permission; the bundle may be noexec.
+  SIGN_TMP=$(mktemp -d "$KEYDIR/signing.XXXXXXXX")
+  trap 'rm -rf -- "$TMP" "${SIGN_TMP:-}"' EXIT
+  install -m 700 ./sign-file "$SIGN_TMP/sign-file"
+  if ! "$SIGN_TMP/sign-file" sha256 "$KEY" "$CERT" "$TMP/e1000e.ko"; then
+    fail "Signing failed. Check executable mount permissions for $KEYDIR and the helper's runtime libraries. No driver installed."
+  fi
   [[ -n $(modinfo -F signer "$TMP/e1000e.ko") ]] || fail 'Module signature missing'
 elif [[ $STATE != *'SecureBoot disabled'* && $STATE != 'Legacy BIOS' ]]; then
   fail "Unrecognized Secure Boot state: $STATE"
