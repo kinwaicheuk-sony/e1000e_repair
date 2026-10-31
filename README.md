@@ -1,4 +1,5 @@
 # Intel I219-V Ethernet Repair for ASRock Z370 Pro4
+
 This fix is for the following board
 
 ```
@@ -38,6 +39,7 @@ rebuilds the boot image. This is a workaround, not an NVM repair.
 You can check if you have the exact problem via `sudo dmesg | grep -i e1000e`.
 
 If you see exactly this line `e1000e 0000:00:1f.6: The NVM Checksum Is Not Valid` from the following output
+
 ```
 [    0.792569] e1000e: Intel(R) PRO/1000 Network Driver
 [    0.792572] e1000e: Copyright(c) 1999 - 2015 Intel Corporation.
@@ -50,50 +52,85 @@ If you see exactly this line `e1000e 0000:00:1f.6: The NVM Checksum Is Not Valid
 this fix if for you.
 
 ## OFFLINE FIX
-TODO: Provide instructions for the offline fix. Completely free of internet requirement.
+
+On the affected PC, check`uname -r`. The offline installer supports Ubuntu
+22.04 on x86_64 with an Intel `8086:15b8` controller at `00:1f.6`.
+
+Go inside `offline-bundle-6.8.0-138-generic/`and run
+
+```bash
+sudo bash offline_fix.sh
+```
+
+No internet is used on the affected PC. Local dependency packages may update
+installed system packages; use the bundle on Ubuntu 22.04 only. With Secure Boot,
+the installer creates a machine-local key and requests MOK enrollment. Reboot,
+select **Enroll MOK**, enter the enrollment password, then run the same installer
+again. Reboot after installation and follow the verification steps below.
+
+The bundle contains an unsigned module and checksums, never a private key.
+Checksums detect transfer damage; obtain the bundle from a trusted builder.
+Kernel upgrades require a new matching bundle. This bypass remains a workaround,
+not an NVM repair. Hardware validation is required before relying on a bundle.
+
+### Notes about how to build the patch (requires internet)
+
+On a Linux computer with internet and Docker installed/running, build a bundle
+for that exact kernel (example):
+
+```bash
+bash build_offline_fix.sh 6.8.0-138-generic
+```
+
+Expect a substantial source download.
+
+This builds the fix package in `offline-bundle-6.8.0-138-generic/`
+
+
 
 ## ONLINE FIX
+
 1. Open Terminal (Ctrl+Alt+T).
-1. Open the folder containing install.sh.
-1. Run: `sudo bash online_fix.sh` to start the patching.
-1. It will prompt you for the MOK (Machine Owner Key) password if Secure Boot is enabled.
-1. Remember the MOK password you set, as you will need it to enroll the key after reboot.
-1. Run: `sudo reboot`
+2. Open the folder containing install.sh.
+3. Run: `sudo bash online_fix.sh` to start the patching.
+4. It will prompt you for the MOK (Machine Owner Key) password if Secure Boot is enabled.
+5. Remember the MOK password you set, as you will need it to enroll the key after reboot.
+6. Run: `sudo reboot`
 
 This time, you will see a blue screen prompting you to enroll the MOK (Machine Owner Key) that you set earlier.
 ![Blue screen for MOK enrollment](./images/MOK01.jpg)
 Select "Enroll MOK" and then enter the MOK password you set earlier, and choose continue.
 
-
-
-
 ## VERIFY AFTER REBOOT
 
 ### Check which driver is being loaded
+
 After the patch, you should see `e1000e` being loaded from the `updates` directory.
 First, check if the patched driver is being loaded via `modinfo -n e1000e`.
 
 If you see
+
 ```
 /lib/modules/6.8.0-138-generic/updates/e1000e.ko
 ```
+
 the patch has been applied successfully.
 
 Otherwise if you see
+
 ```
 /lib/modules/6.8.0-138-generic/kernel/drivers/net/ethernet/intel/e1000e/e1000e.ko
 ```
+
 it is still loading the original driver.
 
-
-
 ### Check if we have internet now
+
 ```
   sudo dmesg | grep -i e1000e
   ip -br addr
   nmcli device status
 ```
-
 
 Expected boot log: NVM checksum invalid; continuing for diagnostic test
 Expected network interface: enp0s31f6, with an IP address after cable
@@ -108,3 +145,16 @@ ROLLBACK (requires USB Ethernet adapter)
 NOTE: Rollback restores the original driver, which may still reject the
 Ethernet controller. Kernel upgrades require a newly built/signed module.
 This is a test-specific workaround, not a universal repair.
+
+### Offline builder networking
+
+The builder uses Docker host networking by default on Linux to avoid bridge DNS
+failures. To use bridge networking with a DNS server reachable from your network:
+
+```bash
+DOCKER_NETWORK=bridge DOCKER_DNS=1.1.1.1 bash build_offline_fix.sh 6.8.0-138-generic offline-retry
+```
+
+Use your network's DNS address if public DNS is blocked. Failed builds leave their
+output directory in place; pass a new output directory when retrying. If Docker
+requires sudo, run `sudo bash build_offline_fix.sh ...`.
