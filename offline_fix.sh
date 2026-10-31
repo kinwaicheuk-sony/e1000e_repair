@@ -17,22 +17,34 @@ DEV=/sys/bus/pci/devices/0000:00:1f.6
 LOG=$(dmesg)
 if [[ $LOG != *'The NVM Checksum Is Not Valid'* && $LOG != *'NVM checksum invalid; continuing for diagnostic test'* ]]; then
   read -r -p 'Checksum failure absent from boot log. Previously confirmed this exact issue? Type YES: ' answer
-  [[ $answer == YES ]] || fail 'Cancelled'
+  [[ ${answer^^} == YES ]] || fail 'Cancelled'
 fi
-# Local files only: APT must never download anything on the target.
-DEBIAN_FRONTEND=noninteractive apt-get --no-download --no-remove -y install "$ROOT"/packages/*.deb
-for tool in modinfo depmod update-initramfs mokutil openssl; do
-  command -v "$tool" >/dev/null || fail "Missing tool: $tool"
+# Use the target's installed tools. Installing the entire dependency archive
+# can upgrade libc/systemd and require packages absent from the bundle.
+# Never run a package manager on the offline target.
+MISSING=()
+for tool in modinfo depmod update-initramfs; do
+  command -v "$tool" >/dev/null || MISSING+=("$tool")
 done
+if [[ -d /sys/firmware/efi ]]; then
+  command -v mokutil >/dev/null || MISSING+=(mokutil)
+fi
+((${#MISSING[@]} == 0)) || fail "Missing required tools: ${MISSING[*]}. No packages or driver were installed. Prepare these prerequisites for this target before retrying."
+
 [[ $(modinfo -F vermagic ./e1000e.ko) == "$KERNEL "* ]] || fail 'Module vermagic mismatch'
+STATE='Legacy BIOS'
+if [[ -d /sys/firmware/efi ]]; then
 STATE=$(mokutil --sb-state 2>&1) || {
   [[ ! -d /sys/firmware/efi ]] || fail "Cannot determine Secure Boot state: $STATE"
   STATE='Legacy BIOS'
 }
+fi
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
 cp e1000e.ko "$TMP/e1000e.ko"
 if [[ $STATE == *'SecureBoot enabled'* ]]; then
+  command -v openssl >/dev/null || fail 'Secure Boot requires openssl; no driver installed.'
+
   KEYDIR=/var/lib/e1000e-repair
   KEY=$KEYDIR/MOK.priv
   CERT=$KEYDIR/MOK.der
